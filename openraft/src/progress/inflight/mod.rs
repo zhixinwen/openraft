@@ -24,7 +24,11 @@ where C: RaftTypeConfig
 {
     None,
 
-    /// Replicating logs in a fixed range `(prev, last]`.
+    /// Probing the matching point with logs from the fixed range `(prev, last]`.
+    ///
+    /// The replication stream sends one AppendEntries request from this range, carrying as much
+    /// of it as storage returns. See [`LogIdRange::probe_completed_by()`] for when the probe is
+    /// considered done.
     Logs {
         log_id_range: LogIdRange<C>,
         inflight_id: InflightId,
@@ -175,11 +179,12 @@ where C: RaftTypeConfig
                     return false;
                 }
 
-                *self = {
-                    debug_assert!(upto >= log_id_range.prev);
-                    debug_assert!(upto <= log_id_range.last);
-                    Inflight::logs(upto, log_id_range.last.clone(), *inflight_id)
-                };
+                debug_assert!(upto >= log_id_range.prev);
+                debug_assert!(upto <= log_id_range.last);
+
+                if log_id_range.probe_completed_by(&upto) {
+                    *self = Inflight::None;
+                }
                 true
             }
             Inflight::Snapshot { inflight_id } => {

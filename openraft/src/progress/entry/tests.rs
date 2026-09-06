@@ -83,14 +83,15 @@ fn test_update_matching() -> anyhow::Result<()> {
         assert_eq!(21, pe.data.searching_end);
     }
 
-    // A non-probe fixed range retains normal partial-ack behavior.
+    // An ack carrying no entry leaves the probe to be sent again.
     {
-        let mut pe = ProgressEntry::<UTConfig>::testing_new(0, Some(log_id(5)));
+        let mut pe = ProgressEntry::<UTConfig>::empty(0, StreamId::new(0), 20);
+        pe.matching = Some(log_id(5));
         pe.data.inflight = inflight_logs(5, 10);
 
-        pe.new_updater(&engine_config).update_matching(Some(log_id(6)), Some(InflightId::new(0)));
-        assert_eq!(inflight_logs(6, 10), pe.data.inflight);
-        assert_eq!(Some(&log_id(6)), pe.matching());
+        pe.new_updater(&engine_config).update_matching(Some(log_id(5)), Some(InflightId::new(0)));
+        assert_eq!(inflight_logs(5, 10), pe.data.inflight);
+        assert_eq!(Some(&log_id(5)), pe.matching());
     }
 
     Ok(())
