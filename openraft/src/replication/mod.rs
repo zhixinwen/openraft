@@ -222,25 +222,29 @@ where
                 continue;
             }
 
-            // A fixed range is one matching-point probe: an acknowledged entry ends it whatever is
-            // left of the range, and RaftCore recomputes the next probe from that acknowledgement.
-            // Without one the probe did not execute and RaftCore still has it inflight, so it must
-            // be sent again rather than dropped.
-            if let Payload::LogIdRange { log_id_range } = &payload
-                && log_id_range.probe_completed_by(&session.acked)
-            {
-                self.inflight_id = None;
+            if let Payload::LogIdRange { log_id_range } = &payload {
+                // An empty range is the commit-only append, delivered by the single request it
+                // produced. A non-empty one is a matching-point probe: an acknowledged entry ends
+                // it whatever is left of the range, and RaftCore recomputes the next probe from
+                // that acknowledgement.
+                let done = log_id_range.len() == 0 || log_id_range.probe_completed_by(&session.acked);
+
+                if done {
+                    self.inflight_id = None;
+                } else {
+                    // The probe did not execute and RaftCore still has it inflight, so send it
+                    // again unchanged. Advancing it from `remote_matched` would replace it with a
+                    // different range: that value is carried across sessions, so it may sit below
+                    // `prev`, or above `last` once the target reverted its log.
+                    self.next_action = Some(payload);
+                }
+
                 continue;
             }
 
-            // if partial success is returned, not all data is exhausted. keep sending
+            // An open-ended stream resumes after whatever the target acknowledged.
             payload.update_matching(self.replication_progress.remote_matched.clone());
-            if payload.len() != Some(0) {
-                self.next_action = Some(payload);
-            } else {
-                // Payload is all sent.
-                self.inflight_id = None;
-            }
+            self.next_action = Some(payload);
         }
     }
 
