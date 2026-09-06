@@ -222,14 +222,10 @@ where
                 continue;
             }
 
-            if let Payload::LogIdRange { log_id_range } = &payload {
-                // An empty range is the commit-only append, delivered by the single request it
-                // produced. A non-empty one is a matching-point probe: an acknowledged entry ends
-                // it whatever is left of the range, and RaftCore recomputes the next probe from
-                // that acknowledgement.
-                let done = log_id_range.len() == 0 || log_id_range.probe_completed_by(&session.acked);
-
-                if done {
+            // A probe is one request: an acknowledged entry ends it whatever is left of the range,
+            // and RaftCore recomputes the next probe from that acknowledgement.
+            if let Payload::Probe { log_id_range } = &payload {
+                if log_id_range.probe_completed_by(&session.acked) {
                     self.inflight_id = None;
                 } else {
                     // The probe did not execute and RaftCore still has it inflight, so send it
@@ -242,9 +238,14 @@ where
                 continue;
             }
 
-            // An open-ended stream resumes after whatever the target acknowledged.
+            // if partial success is returned, not all data is exhausted. keep sending
             payload.update_matching(self.replication_progress.remote_matched.clone());
-            self.next_action = Some(payload);
+            if payload.len() != Some(0) {
+                self.next_action = Some(payload);
+            } else {
+                // Payload is all sent.
+                self.inflight_id = None;
+            }
         }
     }
 

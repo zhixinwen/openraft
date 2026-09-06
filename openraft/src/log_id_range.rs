@@ -70,13 +70,13 @@ where C: RaftTypeConfig
     /// [`AppendEntriesResponse::PartialSuccess`] of `prev_log_id`), so the probe still has to be
     /// sent.
     ///
-    /// [`Inflight::ack()`] and [`ReplicationCore`] must decide this the same way. The engine
+    /// [`Inflight::Probe`] and [`Payload::Probe`] must decide this the same way. The engine
     /// otherwise keeps waiting for a probe the replication task has already dropped, and
     /// replication to that target never resumes.
     ///
     /// [`AppendEntriesResponse::PartialSuccess`]: crate::raft::AppendEntriesResponse::PartialSuccess
-    /// [`Inflight::ack()`]: crate::progress::inflight::Inflight::ack
-    /// [`ReplicationCore`]: crate::replication::ReplicationCore
+    /// [`Inflight::Probe`]: crate::progress::inflight::Inflight::Probe
+    /// [`Payload::Probe`]: crate::replication::payload::Payload::Probe
     pub(crate) fn probe_completed_by(&self, acked: &Option<LogIdOf<C>>) -> bool {
         acked > &self.prev
     }
