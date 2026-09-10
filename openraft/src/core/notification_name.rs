@@ -20,6 +20,8 @@ pub enum NotificationName {
     LocalIO,
     ReplicationProgress,
     HeartbeatProgress,
+    #[since(version = "0.10.0", change = "added transfer-leader timeout notification")]
+    TransferLeaderTimeout,
     StateMachine,
     Tick,
     PendingReadDeadlineReached,

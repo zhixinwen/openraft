@@ -3,10 +3,14 @@ use std::time::Duration;
 
 use maplit::btreeset;
 use openraft::Config;
+use openraft::RPCTypes;
 use openraft::ReadPolicy;
 use openraft::ServerState;
 use openraft::async_runtime::WatchReceiver;
+use openraft::base::BoxFuture;
+use openraft::errors::Infallible;
 use openraft::errors::LinearizableReadError;
+use openraft::errors::RPCError;
 use openraft::raft::TransferLeaderError;
 use openraft::raft::TransferLeaderRequest;
 use openraft::type_config::TypeConfigExt;
@@ -119,6 +123,126 @@ async fn trigger_transfer_leader() -> anyhow::Result<()> {
         n2.wait(timeout()).state(ServerState::Leader, "node-2 become leader").await?;
         n0.wait(timeout()).state(ServerState::Follower, "node-0 become follower").await?;
         n1.wait(timeout()).state(ServerState::Follower, "node-1 become follower").await?;
+    }
+
+    Ok(())
+}
+
+/// If the transfer RPC to the designated target times out before delivery, the source starts a
+/// fenced election instead of waiting for another voter to time out.
+#[tracing::instrument]
+#[test_harness::test(harness = ut_harness)]
+async fn transfer_leader_timeout_starts_recovery_election() -> anyhow::Result<()> {
+    let election_timeout_min = 150;
+    let config = Arc::new(
+        Config {
+            election_timeout_min,
+            election_timeout_max: 300,
+            enable_elect: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config);
+    router.network_send_delay(0);
+
+    tracing::info!("--- initialize cluster and record the original Leader vote");
+    router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+    let n0 = router.get_raft_handle(&0)?;
+    let original_vote = n0.metrics().borrow_watched().vote;
+    let recovery_term = original_vote.leader_id.term + 2;
+
+    tracing::info!("--- delay transfer delivery to the target beyond the RPC timeout");
+    {
+        let delay_target = move |_router: &RaftRouter, _req, _from, to| {
+            let fut = async move {
+                if to == 1 {
+                    TypeConfig::sleep(Duration::from_millis(election_timeout_min * 2)).await;
+                }
+                let res: Result<(), RPCError<TypeConfig, Infallible>> = Ok(());
+                res
+            };
+            let x: BoxFuture<_> = Box::pin(fut);
+            x
+        };
+        router.set_rpc_pre_hook(RPCTypes::TransferLeader, delay_target).await;
+    }
+
+    tracing::info!("--- transfer timeout starts a term-fenced election on the source");
+    {
+        n0.trigger().transfer_leader(1).await?;
+        n0.wait(Some(Duration::from_millis(1_000)))
+            .metrics(
+                |m| m.state == ServerState::Leader && m.vote.leader_id.term == recovery_term,
+                "source wins the recovery election two terms ahead",
+            )
+            .await?;
+        n0.wait(timeout()).leader_with_quorum_acked(None, "recovered Leader establishes its lease").await?;
+    }
+
+    tracing::info!("--- recovered Leader accepts reads and writes");
+    {
+        n0.ensure_linearizable(ReadPolicy::LeaseRead).await?;
+        router.client_request(0, "recovered", 1).await?;
+    }
+
+    Ok(())
+}
+
+/// A timeout may mean that only the response was lost. If the target already won, the timeout
+/// notification must not start a recovery election on the old source.
+#[tracing::instrument]
+#[test_harness::test(harness = ut_harness)]
+async fn transfer_leader_lost_response_does_not_restart_election() -> anyhow::Result<()> {
+    let election_timeout_min = 150;
+    let config = Arc::new(
+        Config {
+            election_timeout_min,
+            election_timeout_max: 300,
+            enable_elect: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config);
+    router.network_send_delay(0);
+
+    tracing::info!("--- initialize cluster and record the original Leader vote");
+    router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+    let n0 = router.get_raft_handle(&0)?;
+    let n1 = router.get_raft_handle(&1)?;
+    let original_vote = n0.metrics().borrow_watched().vote;
+    let transferred_term = original_vote.leader_id.term + 1;
+
+    tracing::info!("--- deliver the transfer to the target but delay its response past timeout");
+    {
+        let delay_target_response = move |_router: &RaftRouter, _req, _resp, _from, to| {
+            let fut = async move {
+                if to == 1 {
+                    TypeConfig::sleep(Duration::from_millis(election_timeout_min * 2)).await;
+                }
+                let res: Result<(), RPCError<TypeConfig, Infallible>> = Ok(());
+                res
+            };
+            let x: BoxFuture<_> = Box::pin(fut);
+            x
+        };
+        router.set_rpc_post_hook(RPCTypes::TransferLeader, delay_target_response).await;
+    }
+
+    tracing::info!("--- target wins before the response timeout");
+    {
+        n0.trigger().transfer_leader(1).await?;
+        n1.wait(timeout()).state(ServerState::Leader, "target becomes Leader").await?;
+
+        TypeConfig::sleep(Duration::from_millis(election_timeout_min * 2)).await;
+
+        let metrics = n1.metrics().borrow_watched().clone();
+        assert_eq!(ServerState::Leader, metrics.state);
+        assert_eq!(transferred_term, metrics.vote.leader_id.term);
+        n0.wait(timeout()).state(ServerState::Follower, "source stays Follower").await?;
     }
 
     Ok(())
