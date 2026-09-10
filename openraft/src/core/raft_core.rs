@@ -1547,9 +1547,16 @@ where
     #[tracing::instrument(level = "trace", skip_all)]
     async fn broadcast_transfer_leader(&mut self, req: TransferLeaderRequest<C>) {
         let ttl = Duration::from_millis(self.config.election_timeout_min);
+        let tx = self.tx_notification.clone();
+        let transfer_from = req.from_leader.clone();
+        let transfer_to = req.to_node_id.clone();
 
-        self.broadcast_to_voters(ttl, |target, mut client, option| {
+        self.broadcast_to_voters(ttl, move |target, mut client, option| {
             let r = req.clone();
+            let tx = tx.clone();
+            let transfer_from = transfer_from.clone();
+            let transfer_to = transfer_to.clone();
+            let is_transfer_target = target == transfer_to;
 
             let span = tracing::debug_span!(
                 parent: &Span::current(),
@@ -1563,6 +1570,14 @@ where
                     Ok(res) => res,
                     Err(timeout) => {
                         tracing::warn!("timeout sending transfer_leader: {}, target: {}", timeout, target);
+                        if is_transfer_target {
+                            tx.send(Notification::TransferLeaderTimeout {
+                                from_leader: transfer_from,
+                                to: transfer_to,
+                            })
+                            .await
+                            .ok();
+                        }
                         return;
                     }
                 };
@@ -1995,6 +2010,10 @@ where
                 if let Some(mut rh) = self.engine.try_replication_handler() {
                     rh.try_update_leader_clock(stream_id, target, sending_time);
                 }
+            }
+
+            Notification::TransferLeaderTimeout { from_leader, to } => {
+                self.engine.recover_from_transfer_timeout(&from_leader, &to);
             }
 
             Notification::StateMachine { command_result } => self.handle_state_machine_result(command_result)?,

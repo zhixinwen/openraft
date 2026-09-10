@@ -87,6 +87,12 @@ where C: RaftTypeConfig
         target: C::NodeId,
     },
 
+    /// The RPC to the designated leadership-transfer target timed out.
+    ///
+    /// A timeout does not prove that the target did not receive the request. The originating vote
+    /// and target fence this notification against a later transfer or leadership change.
+    TransferLeaderTimeout { from_leader: VoteOf<C>, to: C::NodeId },
+
     /// Result of executing a command sent from a state machine worker.
     StateMachine { command_result: sm::CommandResult<C> },
 
@@ -117,6 +123,7 @@ where C: RaftTypeConfig
             Self::LocalIO { .. } => NotificationName::LocalIO,
             Self::ReplicationProgress { .. } => NotificationName::ReplicationProgress,
             Self::HeartbeatProgress { .. } => NotificationName::HeartbeatProgress,
+            Self::TransferLeaderTimeout { .. } => NotificationName::TransferLeaderTimeout,
             Self::StateMachine { .. } => NotificationName::StateMachine,
             Self::Tick { .. } => NotificationName::Tick,
             Self::PendingReadDeadlineReached => NotificationName::PendingReadDeadlineReached,
@@ -189,6 +196,9 @@ where C: RaftTypeConfig
                     leader_vote,
                     sending_time.display(),
                 )
+            }
+            Self::TransferLeaderTimeout { from_leader, to } => {
+                write!(f, "TransferLeaderTimeout: from_leader={}, to={}", from_leader, to)
             }
             Self::StateMachine { command_result } => {
                 write!(f, "{}", command_result)

@@ -265,6 +265,46 @@ where
         self.do_elect(true);
     }
 
+    /// Recover from a timed-out leadership transfer by campaigning in a fenced term.
+    ///
+    /// The transfer target may have received the request even when its response timed out. Such a
+    /// target can start an election in the term immediately following `from_leader`. Campaign two
+    /// terms ahead so delayed work from the timed-out transfer cannot supersede the recovered
+    /// Leader while bypassing its lease.
+    pub(crate) fn recover_from_transfer_timeout(&mut self, from_leader: &VoteOf<C>, to: &C::NodeId) {
+        let Some(leader) = self.leader.as_ref() else {
+            tracing::info!("ignore transfer timeout: this node is no longer Leader");
+            return;
+        };
+
+        if leader.committed_vote_ref().as_ref_vote() != from_leader.as_ref_vote()
+            || leader.get_transfer_to() != Some(to)
+        {
+            tracing::info!("ignore stale transfer timeout: from_leader={}, to={}", from_leader, to);
+            return;
+        }
+
+        if !self.state.membership_state.effective().is_voter(&self.config.id) {
+            tracing::info!("can not recover transfer timeout by election: this node is not a voter");
+            return;
+        }
+
+        tracing::warn!(
+            "leadership transfer timed out; start a fenced recovery election: from_leader={}, to={}",
+            from_leader,
+            to
+        );
+
+        self.pre_candidate = None;
+        self.candidate = None;
+        self.leader = None;
+        self.output.prepend_command(Command::FailPendingReads);
+        self.output.push_command(Command::CloseReplicationStreams);
+
+        let recovery_term = from_leader.term().next().next();
+        self.start_election(recovery_term, true);
+    }
+
     fn do_elect(&mut self, leadership_transfer: bool) {
         // An election attempt supersedes any in-flight Pre-Vote round.
         self.pre_candidate = None;
@@ -274,11 +314,15 @@ where
             return;
         }
 
+        let new_term = self.state.vote.term().next();
+        self.start_election(new_term, leadership_transfer);
+    }
+
+    fn start_election(&mut self, new_term: TermOf<C>, leadership_transfer: bool) {
         // A real campaign consumes the timeout selected before it. Sample the
         // timeout that will gate the next campaign before entering this one.
         self.config.resample_election_timeout();
 
-        let new_term = self.state.vote.term().next();
         let leader_id = LeaderIdOf::<C>::new(new_term, self.config.id.clone());
         let new_vote = VoteOf::<C>::from_leader_id(leader_id, false);
 
