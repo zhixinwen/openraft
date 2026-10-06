@@ -127,6 +127,9 @@ pub enum BlockOperation {
     DelayBuildingSnapshot,
     BuildSnapshot,
     PurgeLog,
+    /// Delay every log append before the entries are stored, emulating a log store whose
+    /// `append` call takes time to return.
+    DelayAppend,
 }
 
 /// Block operations for testing purposes.
@@ -179,6 +182,10 @@ pub struct MemLogStore {
 
     /// When set to true, the next `limited_get_log_entries` call will return an IO error.
     pub fail_next_limited_get: AtomicBool,
+
+    /// Number of `append` calls this log store has received, for tests that check how
+    /// appends are batched.
+    pub append_calls: AtomicU64,
 }
 
 impl MemLogStore {
@@ -194,6 +201,7 @@ impl MemLogStore {
             vote: RwLock::new(None),
             return_empty_limited_get: AtomicBool::new(false),
             fail_next_limited_get: AtomicBool::new(false),
+            append_calls: AtomicU64::new(0),
         }
     }
 
@@ -452,6 +460,13 @@ impl RaftLogStorage<TypeConfig> for Arc<MemLogStore> {
     #[tracing::instrument(level = "trace", skip_all)]
     async fn append<I>(&mut self, entries: I, callback: IOFlushed<TypeConfig>) -> Result<(), io::Error>
     where I: IntoIterator<Item = EntryOf<TypeConfig>> + OptionalSend {
+        self.append_calls.fetch_add(1, Ordering::Relaxed);
+
+        if let Some(d) = self.block.get_blocking(&BlockOperation::DelayAppend) {
+            tracing::info!(?d, "delay append");
+            TypeConfig::sleep(d).await;
+        }
+
         let mut log = self.log.write().await;
         for entry in entries {
             let s =
