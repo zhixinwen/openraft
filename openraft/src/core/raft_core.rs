@@ -1371,7 +1371,11 @@ where
 
             // There is a message waking up the loop, process channels one by one.
 
-            let raft_msg_processed = self.process_raft_msg(balancer.raft_msg()).await?;
+            // Bound a continuous run of client/API messages so replication progress that arrives
+            // while their storage commands execute does not wait behind the entire adaptive
+            // RaftMsg budget.
+            let raft_msg_budget = self.config.cap_raft_msg_budget(balancer.raft_msg());
+            let raft_msg_processed = self.process_raft_msg(raft_msg_budget).await?;
             let notify_processed = self.process_notification(balancer.notification()).await?;
 
             // If one of the channel consumed all its budget, re-balance the budget ratio.
@@ -1381,7 +1385,7 @@ where
                 tracing::info!("there may be more Notification to process, increase Notification ratio");
                 balancer.increase_notification();
             } else {
-                if raft_msg_processed == balancer.raft_msg() {
+                if raft_msg_processed == raft_msg_budget {
                     tracing::info!("there may be more RaftMsg to process, increase RaftMsg ratio");
                     balancer.increase_raft_msg();
                 }

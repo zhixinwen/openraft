@@ -182,7 +182,7 @@ impl SnapshotPolicy {
 #[since(version = "0.10.0", change = "added opt-in quorum-loss inactivity setting")]
 #[since(
     version = "0.10.0",
-    change = "added run_command_threshold and broadcast_submitted_on_append options"
+    change = "added run_command_threshold, max_raft_msg_per_run, and broadcast_submitted_on_append options"
 )]
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "clap", derive(Parser))]
@@ -363,6 +363,19 @@ pub struct Config {
     #[since(version = "0.10.0")]
     #[cfg_attr(feature = "clap", clap(long))]
     pub run_command_threshold: Option<u64>,
+
+    /// Maximum number of queued `RaftMsg` values to process before checking the notification
+    /// channel.
+    ///
+    /// Replication progress is delivered to `RaftCore` through the notification channel. Without
+    /// a cap, a busy core may process its entire adaptive `RaftMsg` budget before observing that
+    /// a quorum has already acknowledged an entry. Setting this option bounds that head-of-line
+    /// blocking while retaining the adaptive budget across iterations.
+    ///
+    /// `None` or `0` preserves the adaptive budget without an additional cap.
+    #[since(version = "0.10.0")]
+    #[cfg_attr(feature = "clap", clap(long))]
+    pub max_raft_msg_per_run: Option<u64>,
 
     /// Publish the submitted-log watermark to replication streams as soon as each
     /// [`RaftLogStorage::append`] returns, instead of only once per `RaftCore` loop iteration.
@@ -663,6 +676,7 @@ impl Default for Config {
             state_machine_channel_size: Some(DEFAULTS.state_machine_channel_size),
             log_stage_capacity: None,
             run_command_threshold: None,
+            max_raft_msg_per_run: None,
             broadcast_submitted_on_append: None,
             enable_tick: DEFAULTS.enable_tick,
             enable_heartbeat: DEFAULTS.enable_heartbeat,
@@ -768,6 +782,16 @@ impl Config {
     /// Defaults to 0 (run commands after every message) if not specified.
     pub(crate) fn run_command_threshold(&self) -> u64 {
         self.run_command_threshold.unwrap_or(0)
+    }
+
+    /// Cap an adaptive `RaftMsg` budget so notification processing gets another opportunity.
+    ///
+    /// `None` and `Some(0)` leave the supplied budget unchanged.
+    pub(crate) fn cap_raft_msg_budget(&self, budget: u64) -> u64 {
+        match self.max_raft_msg_per_run {
+            Some(max) if max > 0 => budget.min(max),
+            _ => budget,
+        }
     }
 
     /// Whether to publish the submitted-log watermark right after each log append returns.

@@ -381,6 +381,24 @@ fn test_config_run_command_threshold() -> anyhow::Result<()> {
 }
 
 #[test]
+fn test_config_max_raft_msg_per_run() -> anyhow::Result<()> {
+    let config = Config::build(&["foo"])?;
+    assert_eq!(None, config.max_raft_msg_per_run);
+    assert_eq!(1_000, config.cap_raft_msg_budget(1_000));
+
+    let config = Config::build(&["foo", "--max-raft-msg-per-run=16"])?;
+    assert_eq!(Some(16), config.max_raft_msg_per_run);
+    assert_eq!(16, config.cap_raft_msg_budget(1_000));
+    assert_eq!(8, config.cap_raft_msg_budget(8));
+
+    let config = Config::build(&["foo", "--max-raft-msg-per-run=0"])?;
+    assert_eq!(Some(0), config.max_raft_msg_per_run);
+    assert_eq!(1_000, config.cap_raft_msg_budget(1_000));
+
+    Ok(())
+}
+
+#[test]
 fn test_config_broadcast_submitted_on_append() -> anyhow::Result<()> {
     // Default: None, which publishes the submitted watermark once per loop iteration.
     let config = Config::build(&["foo"])?;
