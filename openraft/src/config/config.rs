@@ -180,6 +180,10 @@ impl SnapshotPolicy {
 #[since]
 #[since(version = "0.10.0", change = "added reset_backoff_on_transfer_leader option")]
 #[since(version = "0.10.0", change = "added opt-in quorum-loss inactivity setting")]
+#[since(
+    version = "0.10.0",
+    change = "added run_command_threshold, max_raft_msg_per_run, and broadcast_submitted_on_append options"
+)]
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "clap", derive(Parser))]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -339,6 +343,60 @@ pub struct Config {
     #[since(version = "0.10.0")]
     #[cfg_attr(feature = "clap", clap(long))]
     pub log_stage_capacity: Option<u64>,
+
+    /// How many newly proposed log entries `RaftCore` accumulates while draining client
+    /// requests before it runs the queued commands.
+    ///
+    /// Running commands executes the queued `AppendEntries`, which awaits
+    /// [`RaftLogStorage::append`]. With `0` (the default) commands run after every message, so
+    /// each client write batch becomes its own `append` call and every one is awaited before the
+    /// next message is handled. A larger value lets consecutive `AppendEntries` commands be
+    /// merged into one `append` (up to `max_append_entries`), trading a little queueing for far
+    /// fewer serial storage round trips when the log store's `append` is not instantaneous.
+    ///
+    /// Remaining commands always run once the channel is drained or the per-loop budget is
+    /// spent, so this never holds work back across loop iterations.
+    ///
+    /// Defaults to 0 (run after every message).
+    ///
+    /// [`RaftLogStorage::append`]: crate::storage::RaftLogStorage::append
+    #[since(version = "0.10.0")]
+    #[cfg_attr(feature = "clap", clap(long))]
+    pub run_command_threshold: Option<u64>,
+
+    /// Maximum number of queued `RaftMsg` values to process before checking the notification
+    /// channel.
+    ///
+    /// Replication progress is delivered to `RaftCore` through the notification channel. Without
+    /// a cap, a busy core may process its entire adaptive `RaftMsg` budget before observing that
+    /// a quorum has already acknowledged an entry. Setting this option bounds that head-of-line
+    /// blocking while retaining the adaptive budget across iterations.
+    ///
+    /// `None` or `0` preserves the adaptive budget without an additional cap.
+    #[since(version = "0.10.0")]
+    #[cfg_attr(feature = "clap", clap(long))]
+    pub max_raft_msg_per_run: Option<u64>,
+
+    /// Publish the submitted-log watermark to replication streams as soon as each
+    /// [`RaftLogStorage::append`] returns, instead of only once per `RaftCore` loop iteration.
+    ///
+    /// Replication streams may only read entries the log store has accepted, and they learn
+    /// about newly accepted entries through this watermark. By default it is published once per
+    /// loop iteration, after every queued message and notification has been handled, so an entry
+    /// appended early in an iteration is not replicated until the whole iteration finishes.
+    /// Enabling this lets replication start right after the entry's `append` returns, which
+    /// `RaftLogStorage::append` guarantees is when the entry becomes readable.
+    ///
+    /// Defaults to `false`.
+    ///
+    /// [`RaftLogStorage::append`]: crate::storage::RaftLogStorage::append
+    #[since(version = "0.10.0")]
+    #[cfg_attr(feature = "clap", clap(long,
+           action = clap::ArgAction::Set,
+           num_args = 0..=1,
+           default_missing_value = "true"
+    ))]
+    pub broadcast_submitted_on_append: Option<bool>,
 
     /// Enable or disable tick.
     ///
@@ -617,6 +675,9 @@ impl Default for Config {
             notification_channel_size: Some(DEFAULTS.notification_channel_size),
             state_machine_channel_size: Some(DEFAULTS.state_machine_channel_size),
             log_stage_capacity: None,
+            run_command_threshold: None,
+            max_raft_msg_per_run: None,
+            broadcast_submitted_on_append: None,
             enable_tick: DEFAULTS.enable_tick,
             enable_heartbeat: DEFAULTS.enable_heartbeat,
             enable_elect: DEFAULTS.enable_elect,
@@ -714,6 +775,30 @@ impl Config {
     #[allow(dead_code)]
     pub(crate) fn log_stage_capacity(&self) -> usize {
         self.log_stage_capacity.unwrap_or(1024) as usize
+    }
+
+    /// Get how many newly proposed entries to accumulate before running queued commands.
+    ///
+    /// Defaults to 0 (run commands after every message) if not specified.
+    pub(crate) fn run_command_threshold(&self) -> u64 {
+        self.run_command_threshold.unwrap_or(0)
+    }
+
+    /// Cap an adaptive `RaftMsg` budget so notification processing gets another opportunity.
+    ///
+    /// `None` and `Some(0)` leave the supplied budget unchanged.
+    pub(crate) fn cap_raft_msg_budget(&self, budget: u64) -> u64 {
+        match self.max_raft_msg_per_run {
+            Some(max) if max > 0 => budget.min(max),
+            _ => budget,
+        }
+    }
+
+    /// Whether to publish the submitted-log watermark right after each log append returns.
+    ///
+    /// Defaults to `false` if not specified.
+    pub(crate) fn broadcast_submitted_on_append(&self) -> bool {
+        self.broadcast_submitted_on_append.unwrap_or(false)
     }
 
     /// Get the maximum number of log entries per append I/O operation.

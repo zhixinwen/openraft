@@ -1375,7 +1375,11 @@ where
 
             // There is a message waking up the loop, process channels one by one.
 
-            let raft_msg_processed = self.process_raft_msg(balancer.raft_msg()).await?;
+            // Bound a continuous run of client/API messages so replication progress that arrives
+            // while their storage commands execute does not wait behind the entire adaptive
+            // RaftMsg budget.
+            let raft_msg_budget = self.config.cap_raft_msg_budget(balancer.raft_msg());
+            let raft_msg_processed = self.process_raft_msg(raft_msg_budget).await?;
             let notify_processed = self.process_notification(balancer.notification()).await?;
 
             // If one of the channel consumed all its budget, re-balance the budget ratio.
@@ -1385,7 +1389,7 @@ where
                 tracing::info!("there may be more Notification to process, increase Notification ratio");
                 balancer.increase_notification();
             } else {
-                if raft_msg_processed == balancer.raft_msg() {
+                if raft_msg_processed == raft_msg_budget {
                     tracing::info!("there may be more RaftMsg to process, increase RaftMsg ratio");
                     balancer.increase_raft_msg();
                 }
@@ -1407,10 +1411,10 @@ where
 
         let mut processed = 0u64;
         let mut total = 0u64;
-        // Being 0 disabled batch msg processing.
-        // TODO: make it configurable
-        let run_command_threshold = 0;
-        let mut last_log_index = 0;
+        // How many newly proposed entries to accumulate before running the queued commands.
+        // 0 runs them after every message, i.e., batching is disabled.
+        let run_command_threshold = self.config.run_command_threshold();
+        let mut last_log_index = self.engine.state.last_log_id().next_index();
 
         for _i in 0..at_most {
             let res = self.rx_api.try_recv().await?;
@@ -2399,6 +2403,12 @@ where
 
         // Submit IO request, do not wait for the response.
         self.log_store.append(entries, callback).await.sto_write_logs()?;
+
+        // `append()` has returned, so the entries are readable from the log store. Let the
+        // replication streams read them now rather than at the end of this loop iteration.
+        if self.config.broadcast_submitted_on_append() {
+            self.io_broadcast.submitted.send_if_greater(io_id);
+        }
 
         Ok(())
     }
