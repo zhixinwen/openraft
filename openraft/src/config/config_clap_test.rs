@@ -365,3 +365,36 @@ fn test_config_lifecycle_latency_capacity() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_config_run_command_threshold() -> anyhow::Result<()> {
+    // Default: None, which runs commands after every message.
+    let config = Config::build(&["foo"])?;
+    assert_eq!(None, config.run_command_threshold);
+    assert_eq!(0, config.run_command_threshold());
+
+    let config = Config::build(&["foo", "--run-command-threshold=64"])?;
+    assert_eq!(Some(64), config.run_command_threshold);
+    assert_eq!(64, config.run_command_threshold());
+
+    Ok(())
+}
+
+#[test]
+fn test_config_broadcast_submitted_on_append() -> anyhow::Result<()> {
+    // Default: None, which publishes the submitted watermark once per loop iteration.
+    let config = Config::build(&["foo"])?;
+    assert_eq!(None, config.broadcast_submitted_on_append);
+    assert!(!config.broadcast_submitted_on_append());
+
+    // A bare flag enables it.
+    let config = Config::build(&["foo", "--broadcast-submitted-on-append"])?;
+    assert_eq!(Some(true), config.broadcast_submitted_on_append);
+    assert!(config.broadcast_submitted_on_append());
+
+    let config = Config::build(&["foo", "--broadcast-submitted-on-append=false"])?;
+    assert_eq!(Some(false), config.broadcast_submitted_on_append);
+    assert!(!config.broadcast_submitted_on_append());
+
+    Ok(())
+}

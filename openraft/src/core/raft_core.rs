@@ -1403,10 +1403,10 @@ where
 
         let mut processed = 0u64;
         let mut total = 0u64;
-        // Being 0 disabled batch msg processing.
-        // TODO: make it configurable
-        let run_command_threshold = 0;
-        let mut last_log_index = 0;
+        // How many newly proposed entries to accumulate before running the queued commands.
+        // 0 runs them after every message, i.e., batching is disabled.
+        let run_command_threshold = self.config.run_command_threshold();
+        let mut last_log_index = self.engine.state.last_log_id().next_index();
 
         for _i in 0..at_most {
             let res = self.rx_api.try_recv().await?;
@@ -2395,6 +2395,12 @@ where
 
         // Submit IO request, do not wait for the response.
         self.log_store.append(entries, callback).await.sto_write_logs()?;
+
+        // `append()` has returned, so the entries are readable from the log store. Let the
+        // replication streams read them now rather than at the end of this loop iteration.
+        if self.config.broadcast_submitted_on_append() {
+            self.io_broadcast.submitted.send_if_greater(io_id);
+        }
 
         Ok(())
     }
