@@ -80,6 +80,7 @@ use crate::StorageHelper;
 use crate::async_runtime::MpscWeakSender;
 use crate::async_runtime::OneshotSender;
 use crate::async_runtime::Select2;
+use crate::async_runtime::mpsc::MpscReceiver;
 use crate::async_runtime::mpsc::MpscSender;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::async_runtime::watch::WatchSender;
@@ -632,7 +633,7 @@ where
                     rx_install_snapshot,
 
                     tx_notification: tx_notify,
-                    rx_notification: rx_notify,
+                    rx_notification: rx_notify.peekable(),
 
                     io_broadcast: IoBroadcast {
                         completed: tx_io_completed,
@@ -671,7 +672,10 @@ where
                 let join_handle = C::spawn(core_fut);
 
                 let tick_period = Duration::from_millis(config.tick_interval());
-                let enabled = inner.runtime_config.enable_tick.subscribe();
+                let enabled = {
+                    let enable_tick = inner.runtime_config.enable_tick.lock().unwrap();
+                    enable_tick.subscribe()
+                };
                 let tick_handle = Tick::spawn(tick_period, tick_tx, enabled);
                 *inner.tick_handle.lock().unwrap() = Some(tick_handle);
                 join_handle
